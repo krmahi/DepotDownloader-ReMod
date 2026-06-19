@@ -15,6 +15,13 @@ using SteamKit2.CDN;
 
 namespace DepotDownloader
 {
+    static class TokenCFG
+    {
+        public static bool useAppToken;
+        public static bool usePackageToken;
+        public static ulong appToken;
+        public static ulong packageToken;
+    }
     class Program
     {
         private static bool[] consumedArgs;
@@ -66,6 +73,11 @@ namespace DepotDownloader
 
             var username = GetParameter<string>(args, "-username") ?? GetParameter<string>(args, "-user");
             var password = GetParameter<string>(args, "-password") ?? GetParameter<string>(args, "-pass");
+
+            TokenCFG.useAppToken = HasParameter(args, "-apptoken");
+            TokenCFG.usePackageToken = HasParameter(args, "-packagetoken");
+            TokenCFG.appToken = Convert.ToUInt64(GetParameter<string>(args, "-apptoken"));
+            TokenCFG.packageToken = Convert.ToUInt64(GetParameter<string>(args, "-packagetoken"));
             ContentDownloader.Config.RememberPassword = HasParameter(args, "-remember-password");
             ContentDownloader.Config.UseQrCode = HasParameter(args, "-qr");
             ContentDownloader.Config.SkipAppConfirmation = HasParameter(args, "-no-mobile");
@@ -133,6 +145,25 @@ namespace DepotDownloader
                     Console.WriteLine("Warning: Unable to load filelist: {0}", ex);
                 }
             }
+            string depotKeysList = GetParameter<string>(args, "-depotkeys");
+
+
+            if (depotKeysList != null)
+            {
+                try
+                {
+                    string depotKeysListData = File.ReadAllText(depotKeysList);
+                    string[] lines = depotKeysListData.Split(new char[] { '\n', '\r' }, StringSplitOptions.RemoveEmptyEntries);
+
+                    DepotKeyStore.AddAll(lines);
+                    
+                    Console.WriteLine("Using depot keys from '{0}'.", depotKeysList);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("Warning: Unable to load filelist: {0}", ex.ToString());
+                }
+            }
 
             ContentDownloader.Config.InstallDirectory = GetParameter<string>(args, "-dir");
 
@@ -156,6 +187,8 @@ namespace DepotDownloader
 
             ContentDownloader.Config.MaxDownloads = GetParameter(args, "-max-downloads", 8);
             ContentDownloader.Config.LoginID = HasParameter(args, "-loginid") ? GetParameter<uint>(args, "-loginid") : null;
+            ContentDownloader.Config.UseManifestFile = HasParameter(args, "-manifestfile");
+            ContentDownloader.Config.ManifestFile = GetParameter<string>(args, "-manifestfile");
 
             #endregion
 
@@ -532,6 +565,10 @@ namespace DepotDownloader
             Console.WriteLine();
             Console.WriteLine("  -debug                   - enable verbose debug logging.");
             Console.WriteLine("  -V or --version          - print version and runtime.");
+            Console.WriteLine("  -depotkeys <file>        - a list of depot keys to use ('depotID;hexKey' per line).");
+            Console.WriteLine("  -manifestfile <file>     - Use Specified Manifest file from Steam.");
+            Console.WriteLine("  -apptoken <#>            - Use Specified App Access Token.");
+            Console.WriteLine("  -packagetoken <#>        - Use Specified Package Access Token.");
         }
 
         static void PrintVersion(bool printExtra = false)

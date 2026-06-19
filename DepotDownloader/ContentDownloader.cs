@@ -146,11 +146,7 @@ namespace DepotDownloader
                 }
             }
 
-            // Check if this app is free to download without a license
-            var info = GetSteam3AppSection(appId, EAppInfoSection.Common);
-            if (info != null && info["FreeToDownload"].AsBoolean())
-                return true;
-
+            
             return false;
         }
 
@@ -186,6 +182,7 @@ namespace DepotDownloader
 
 
             var depots = GetSteam3AppSection(appId, EAppInfoSection.Depots);
+			if (depots == null) return 0; // Mod for force download
             var branches = depots["branches"];
             var node = branches[branch];
 
@@ -203,6 +200,7 @@ namespace DepotDownloader
         static uint GetSteam3DepotProxyAppId(uint depotId, uint appId)
         {
             var depots = GetSteam3AppSection(appId, EAppInfoSection.Depots);
+			if (depots == null) return INVALID_APP_ID; // Mod for force download
             var depotChild = depots[depotId.ToString()];
 
             if (depotChild == KeyValue.Invalid)
@@ -466,7 +464,7 @@ namespace DepotDownloader
             DepotConfigStore.LoadFromFile(Path.Combine(configPath, CONFIG_DIR, "depot.config"));
 
             await steam3?.RequestAppInfo(appId);
-
+			/*
             if (!await AccountHasAccess(appId, appId))
             {
                 if (steam3.steamUser.SteamID.AccountType != EAccountType.AnonUser && await steam3.RequestFreeAppLicense(appId))
@@ -482,7 +480,7 @@ namespace DepotDownloader
                     throw new ContentDownloaderException(string.Format("App {0} ({1}) is not available from this account.", appId, contentName));
                 }
             }
-
+			*/
             var hasSpecificDepots = depotManifestIds.Count > 0;
             var depotIdsFound = new List<uint>();
             var depotIdsExpected = depotManifestIds.Select(x => x.depotId).ToList();
@@ -571,7 +569,8 @@ namespace DepotDownloader
                 if (depotIdsFound.Count < depotIdsExpected.Count)
                 {
                     var remainingDepotIds = depotIdsExpected.Except(depotIdsFound);
-                    throw new ContentDownloaderException(string.Format("Depot {0} not listed for app {1}", string.Join(", ", remainingDepotIds), appId));
+                    // throw new ContentDownloaderException(string.Format("Depot {0} not listed for app {1}", string.Join(", ", remainingDepotIds), appId));
+					// Mod for force download
                 }
             }
 
@@ -605,13 +604,14 @@ namespace DepotDownloader
             {
                 await steam3.RequestAppInfo(appId);
             }
-
+			/*
             if (!await AccountHasAccess(appId, depotId))
             {
                 Console.WriteLine("Depot {0} is not available from this account.", depotId);
 
                 return null;
             }
+			*/
 
             if (manifestId == INVALID_MANIFEST_ID)
             {
@@ -630,8 +630,17 @@ namespace DepotDownloader
                 }
             }
 
-            await steam3.RequestDepotKey(depotId, appId);
-            if (!steam3.DepotKeys.TryGetValue(depotId, out var depotKey))
+            byte[] depotKey = null;
+            if (DepotKeyStore.ContainsKey(depotId))
+            {
+                depotKey = DepotKeyStore.Get(depotId);
+                steam3.DepotKeys.Add(depotId,depotKey);
+            }
+            else
+            {
+                await steam3.RequestDepotKey(depotId, appId);
+            }            
+            if (!steam3.DepotKeys.TryGetValue(depotId, out depotKey))            
             {
                 Console.WriteLine("No valid depot key for {0}, unable to download.", depotId);
                 return null;
@@ -739,6 +748,43 @@ namespace DepotDownloader
                 }
             }
 
+            // Pre-delete files that existed in the previous manifest but are not present in the new manifests
+            // This avoids the situation where downloads write new files and a later deletion step removes them.
+            foreach (var depotFileData in depotsToDownload)
+            {
+                if (depotFileData.previousManifest == null)
+                    continue;
+
+                var previousFilteredFiles = depotFileData.previousManifest.Files.AsParallel().Where(f => TestIsFileIncluded(f.FileName)).Select(f => f.FileName).ToHashSet();
+
+                if (string.IsNullOrWhiteSpace(Config.InstallDirectory))
+                {
+                    previousFilteredFiles.ExceptWith(depotFileData.allFileNames);
+                }
+                else
+                {
+                    previousFilteredFiles.ExceptWith(allFileNamesAllDepots);
+                }
+
+                foreach (var existingFileName in previousFilteredFiles)
+                {
+                    var fileFinalPath = Path.Combine(depotFileData.depotDownloadInfo.InstallDir, existingFileName);
+
+                    if (!File.Exists(fileFinalPath))
+                        continue;
+
+                    try
+                    {
+                        File.Delete(fileFinalPath);
+                        Console.WriteLine("Deleted {0}", fileFinalPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine("Warning: Failed to delete {0}: {1}", fileFinalPath, ex.Message);
+                    }
+                }
+            }
+
             foreach (var depotFileData in depotsToDownload)
             {
                 await DownloadSteam3AsyncDepotFiles(cts, downloadCounter, depotFileData, allFileNamesAllDepots);
@@ -763,10 +809,6 @@ namespace DepotDownloader
             var lastManifestId = INVALID_MANIFEST_ID;
             DepotConfigStore.Instance.InstalledManifestIDs.TryGetValue(depot.DepotId, out lastManifestId);
 
-            // In case we have an early exit, this will force equiv of verifyall next run.
-            DepotConfigStore.Instance.InstalledManifestIDs[depot.DepotId] = INVALID_MANIFEST_ID;
-            DepotConfigStore.Save();
-
             if (lastManifestId != INVALID_MANIFEST_ID)
             {
                 // We only have to show this warning if the old manifest ID was different
@@ -774,7 +816,32 @@ namespace DepotDownloader
                 oldManifest = Util.LoadManifestFromFile(configDir, depot.DepotId, lastManifestId, badHashWarning);
             }
 
-            if (lastManifestId == depot.ManifestId && oldManifest != null)
+            if (Config.UseManifestFile)
+            {
+                try
+                {
+                    newManifest = DepotManifest.LoadFromFile(Config.ManifestFile);
+                    if (newManifest.FilenamesEncrypted)
+                    {
+                        if (!newManifest.DecryptFilenames(depot.DepotKey))
+                        {
+                            Console.WriteLine("Failed to decrypt filenames in manifest file.");
+                            return null;
+                        }
+                    }
+                }
+                catch (Exception e)
+                {
+                    Console.WriteLine("Failed to load manifest file '{0}': {1}", Config.ManifestFile, e.Message);
+                    return null;
+                }
+            }
+
+            if (newManifest != null)
+            {
+                Console.WriteLine("Using specified manifest file for depot {0}.", depot.DepotId);
+            }
+            else if (lastManifestId == depot.ManifestId && oldManifest != null)
             {
                 newManifest = oldManifest;
                 Console.WriteLine("Already have manifest {0} for depot {1}.", depot.ManifestId, depot.DepotId);
@@ -899,8 +966,6 @@ namespace DepotDownloader
 
                     // Throw the cancellation exception if requested so that this task is marked failed
                     cts.Token.ThrowIfCancellationRequested();
-
-                    Util.SaveManifestToFile(configDir, newManifest);
                 }
             }
 
@@ -916,6 +981,13 @@ namespace DepotDownloader
 
             var filesAfterExclusions = newManifest.Files.AsParallel().Where(f => TestIsFileIncluded(f.FileName)).ToList();
             var allFileNames = new HashSet<string>(filesAfterExclusions.Count);
+
+            // Inform the user when we have a saved previous manifest available
+            // so they know chunk-level verification and reuse will be attempted.
+            if (oldManifest != null)
+            {
+                Console.WriteLine("Using saved previous manifest {0} from {1} for delta verification (will reuse unchanged chunks where possible).", lastManifestId, configDir);
+            }
 
             // Pre-process
             filesAfterExclusions.ForEach(file =>
@@ -984,34 +1056,11 @@ namespace DepotDownloader
                 );
             });
 
-            // Check for deleted files if updating the depot.
-            if (depotFilesData.previousManifest != null)
-            {
-                var previousFilteredFiles = depotFilesData.previousManifest.Files.AsParallel().Where(f => TestIsFileIncluded(f.FileName)).Select(f => f.FileName).ToHashSet();
+            // Deletions were handled earlier, before downloads, to avoid removing re-added files.
 
-                // Check if we are writing to a single output directory. If not, each depot folder is managed independently
-                if (string.IsNullOrWhiteSpace(Config.InstallDirectory))
-                {
-                    // Of the list of files in the previous manifest, remove any file names that exist in the current set of all file names
-                    previousFilteredFiles.ExceptWith(depotFilesData.allFileNames);
-                }
-                else
-                {
-                    // Of the list of files in the previous manifest, remove any file names that exist in the current set of all file names across all depots being downloaded
-                    previousFilteredFiles.ExceptWith(allFileNamesAllDepots);
-                }
-
-                foreach (var existingFileName in previousFilteredFiles)
-                {
-                    var fileFinalPath = Path.Combine(depot.InstallDir, existingFileName);
-
-                    if (!File.Exists(fileFinalPath))
-                        continue;
-
-                    File.Delete(fileFinalPath);
-                    Console.WriteLine("Deleted {0}", fileFinalPath);
-                }
-            }
+            var configDir = Path.Combine(depot.InstallDir, CONFIG_DIR);
+            Directory.CreateDirectory(configDir);
+            Util.SaveManifestToFile(configDir, depotFilesData.manifest);
 
             DepotConfigStore.Instance.InstalledManifestIDs[depot.DepotId] = depot.ManifestId;
             DepotConfigStore.Save();
@@ -1118,6 +1167,21 @@ namespace DepotDownloader
                                     copyChunks.Add(match);
                                 }
                             }
+                        }
+
+                        // Report matching/copy/download plan for this file so user can verify chunk reuse
+                        try
+                        {
+                            var matched = matchingChunks.Count;
+                            var copied = copyChunks.Count;
+                            var toDownload = neededChunks.Count;
+                            long savedBytes = copyChunks.Sum(c => (long)c.OldChunk.UncompressedLength);
+
+                            Console.WriteLine("File: {0} -> matched chunks: {1}, copied: {2}, to download: {3}, estimated saved bytes: {4}", fileFinalPath, matched, copied, toDownload, savedBytes);
+                        }
+                        catch
+                        {
+                            // ignore logging errors
                         }
 
                         if (!hashMatches || neededChunks.Count > 0)

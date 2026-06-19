@@ -164,6 +164,10 @@ namespace DepotDownloader
                 request.AccessToken = token;
             }
 
+            if (TokenCFG.useAppToken)
+            {
+                request.AccessToken = TokenCFG.appToken;
+            }
             var appInfoMultiple = await steamApps.PICSGetProductInfo([request], []);
 
             foreach (var appInfo in appInfoMultiple.Results)
@@ -202,6 +206,10 @@ namespace DepotDownloader
                     request.AccessToken = token;
                 }
 
+                if (TokenCFG.usePackageToken)
+                {
+                    request.AccessToken = TokenCFG.packageToken;
+                }
                 packageRequests.Add(request);
             }
 
@@ -324,6 +332,10 @@ namespace DepotDownloader
 
             AppTokens.TryGetValue(appid, out var accessToken); // Should be filled by RequestAppInfo
 
+            if (TokenCFG.useAppToken)
+            {
+                accessToken = TokenCFG.appToken;
+            }
             var privateBeta = await steamApps.PICSGetPrivateBeta(appid, accessToken, branch, branchPassword);
 
             Console.WriteLine($"Retrieved private beta depot section for {appid} with result: {privateBeta.Result}");
