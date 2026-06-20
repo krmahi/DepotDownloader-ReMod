@@ -218,7 +218,7 @@ namespace DepotDownloader
                 }
             }
 
-            
+
             return false;
         }
 
@@ -254,7 +254,7 @@ namespace DepotDownloader
 
 
             var depots = GetSteam3AppSection(appId, EAppInfoSection.Depots);
-			if (depots == null) return 0; // Mod for force download
+            if (depots == null) return 0; // Mod for force download
             var branches = depots["branches"];
             var node = branches[branch];
 
@@ -272,7 +272,7 @@ namespace DepotDownloader
         static uint GetSteam3DepotProxyAppId(uint depotId, uint appId)
         {
             var depots = GetSteam3AppSection(appId, EAppInfoSection.Depots);
-			if (depots == null) return INVALID_APP_ID; // Mod for force download
+            if (depots == null) return INVALID_APP_ID; // Mod for force download
             var depotChild = depots[depotId.ToString()];
 
             if (depotChild == KeyValue.Invalid)
@@ -536,7 +536,7 @@ namespace DepotDownloader
             DepotConfigStore.LoadFromFile(Path.Combine(configPath, CONFIG_DIR, "depot.config"));
 
             await steam3?.RequestAppInfo(appId);
-			/*
+            /*
             if (!await AccountHasAccess(appId, appId))
             {
                 if (steam3.steamUser.SteamID.AccountType != EAccountType.AnonUser && await steam3.RequestFreeAppLicense(appId))
@@ -642,7 +642,7 @@ namespace DepotDownloader
                 {
                     var remainingDepotIds = depotIdsExpected.Except(depotIdsFound);
                     // throw new ContentDownloaderException(string.Format("Depot {0} not listed for app {1}", string.Join(", ", remainingDepotIds), appId));
-					// Mod for force download
+                    // Mod for force download
                 }
             }
 
@@ -676,7 +676,7 @@ namespace DepotDownloader
             {
                 await steam3.RequestAppInfo(appId);
             }
-			/*
+            /*
             if (!await AccountHasAccess(appId, depotId))
             {
                 Console.WriteLine("Depot {0} is not available from this account.", depotId);
@@ -706,13 +706,13 @@ namespace DepotDownloader
             if (DepotKeyStore.ContainsKey(depotId))
             {
                 depotKey = DepotKeyStore.Get(depotId);
-                steam3.DepotKeys.Add(depotId,depotKey);
+                steam3.DepotKeys.Add(depotId, depotKey);
             }
             else
             {
                 await steam3.RequestDepotKey(depotId, appId);
-            }            
-            if (!steam3.DepotKeys.TryGetValue(depotId, out depotKey))            
+            }
+            if (!steam3.DepotKeys.TryGetValue(depotId, out depotKey))
             {
                 Console.WriteLine("No valid depot key for {0}, unable to download.", depotId);
                 return null;
@@ -1259,7 +1259,7 @@ namespace DepotDownloader
                             var matched = matchingChunks.Count;
                             var copied = copyChunks.Count;
                             var toDownload = neededChunks.Count;
-                            long savedBytes = copyChunks.Sum(c => (long)c.OldChunk.UncompressedLength);
+                            var savedBytes = copyChunks.Sum(c => (long)c.OldChunk.UncompressedLength);
 
                             Console.WriteLine("File: {0} -> matched chunks: {1}, copied: {2}, to download: {3}, estimated saved bytes: {4}", fileFinalPath, matched, copied, toDownload, savedBytes);
                         }
