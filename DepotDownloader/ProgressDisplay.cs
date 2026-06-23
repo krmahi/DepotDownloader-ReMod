@@ -7,26 +7,21 @@ using Spectre.Console;
 
 namespace DepotDownloader;
 
-// Renders a single sticky progress bar + transfer speed on the last printed
-// line while a download is active. This intentionally knows nothing about
-// chunks, files, or MaxDownloads - it just periodically samples whatever
-// (downloaded, total) snapshot it's given, the same way Ansi.Progress()
-// (the Windows taskbar indicator) already does from the same counters.
-//
-// All console output that may happen while a download is active should go
-// through WriteLine() instead of Console.WriteLine() directly, so it scrolls
-// above the bar instead of being overwritten by it. When no download is
-// active (or the terminal doesn't support ANSI), WriteLine() is a transparent
-// passthrough to Console.WriteLine().
 static class ProgressDisplay
 {
+    private enum ProgressPhase { Validation, Download }
+
     private static readonly object sync = new();
 
     private static Func<(ulong downloaded, ulong total)> getProgress;
+    private static Func<bool> getIsScanning;
+    private static Func<bool> getHasDownloads;
+    private static Func<ulong> getUpdateSize;
     private static Timer timer;
 
     private static bool enabled;
     private static bool active;
+    private static ProgressPhase currentPhase = ProgressPhase.Validation;
 
     private static long lastSampleTimestamp;
     private static ulong lastSampleBytes;
@@ -35,15 +30,15 @@ static class ProgressDisplay
     private static string lastBarText = "";
 
     private const int RedrawIntervalMs = 150;
-    private const double SmoothingFactor = 0.25; // weight given to each new speed sample
+    private const double SmoothingFactor = 0.25;
     private const int BarWidth = 28;
 
-    // Begin showing the sticky bar. getProgress is called periodically (off
-    // the calling thread) and should return a consistent (downloaded, total)
-    // snapshot - take whatever lock you already use around those counters.
-    public static void Start(Func<(ulong downloaded, ulong total)> progressSnapshot)
+    public static void Start(Func<(ulong downloaded, ulong total)> progressSnapshot, Func<bool> isScanning, Func<bool> hasDownloads = null, Func<ulong> updateSize = null)
     {
         getProgress = progressSnapshot;
+        getIsScanning = isScanning;
+        getHasDownloads = hasDownloads;
+        getUpdateSize = updateSize;
 
         if (Console.IsInputRedirected || Console.IsOutputRedirected)
         {
@@ -62,20 +57,19 @@ static class ProgressDisplay
         lock (sync)
         {
             active = true;
+            currentPhase = ProgressPhase.Validation;
             lastSampleTimestamp = Environment.TickCount64;
             lastSampleBytes = 0;
             smoothedBytesPerSecond = 0;
             lastBarText = "";
 
-            Console.Write("\x1B[?25l"); // hide cursor
+            Console.Write("\x1B[?25l");
             Redraw();
         }
 
         timer = new Timer(_ => Tick(), null, RedrawIntervalMs, RedrawIntervalMs);
     }
 
-    // Stop and clean up. Safe to call even if Start() was never called or the
-    // bar was never enabled. Always call this from a finally block.
     public static void Stop()
     {
         if (!enabled)
@@ -95,8 +89,8 @@ static class ProgressDisplay
         {
             if (active)
             {
-                Console.Write("\r\x1B[2K"); // clear the bar line
-                Console.Write("\x1B[?25h"); // show cursor
+                Console.Write("\r\x1B[2K");
+                Console.Write("\x1B[?25h");
                 active = false;
             }
         }
@@ -119,9 +113,9 @@ static class ProgressDisplay
 
         lock (sync)
         {
-            Console.Write("\r\x1B[2K");   // clear the bar line
-            Console.WriteLine(message);    // real log line takes its place
-            Console.Write(lastBarText);    // redraw the bar on the new last line
+            Console.Write("\r\x1B[2K");
+            Console.WriteLine(message);
+            Console.Write(lastBarText);
         }
     }
 
@@ -143,10 +137,21 @@ static class ProgressDisplay
         }
     }
 
-    // Caller must hold sync.
     private static void Redraw()
     {
         var (downloaded, total) = getProgress();
+        var isScanning = getIsScanning != null && getIsScanning();
+        var hasDownloads = getHasDownloads != null && getHasDownloads();
+
+        // Auto-detect transition from validation to download phase
+        if (currentPhase == ProgressPhase.Validation && !isScanning && hasDownloads)
+        {
+            currentPhase = ProgressPhase.Download;
+            lastSampleTimestamp = Environment.TickCount64;
+            lastSampleBytes = 0;
+            smoothedBytesPerSecond = 0;
+            lastBarText = "";
+        }
 
         var now = Environment.TickCount64;
         var elapsedMs = now - lastSampleTimestamp;
@@ -164,17 +169,47 @@ static class ProgressDisplay
             lastSampleTimestamp = now;
         }
 
-        var percent = total > 0 ? Math.Clamp(downloaded / (float)total * 100f, 0f, 100f) : 100f;
+        var percent = total > 0 ? Math.Clamp(downloaded / (float)total * 100f, 0f, 100f) : 0f;
         var filled = (int)(percent / 100f * BarWidth);
 
         var bar = "[" + new string('#', filled) + new string('-', BarWidth - filled) + "]";
-        var text = $"{bar} {percent,6:0.00}%  {FormatBytes(downloaded)}/{FormatBytes(total)}  {FormatBytes((ulong)smoothedBytesPerSecond)}/s";
+
+        string stateTag;
+        if (isScanning)
+        {
+            stateTag = "\x1B[33mValidating\x1B[0m";
+        }
+        else if (!hasDownloads)
+        {
+            stateTag = "\x1B[32mUp to date\x1B[0m";
+        }
+        else
+        {
+            stateTag = "\x1B[36mDownloading\x1B[0m";
+        }
+
+        // Only show update size when we're past validation and actually downloading
+        var updateTag = "";
+        if (!isScanning && hasDownloads && getUpdateSize != null)
+        {
+            var updateSize = getUpdateSize();
+            if (updateSize > 0)
+            {
+                updateTag = $"  (Update: {FormatBytes(updateSize)})";
+            }
+        }
+
+        var text = $"{stateTag}{updateTag}  {bar} {percent,6:0.00}%  {FormatBytes(downloaded)}/{FormatBytes(total)}  {FormatBytes((ulong)smoothedBytesPerSecond)}/s";
 
         lastBarText = text;
         Console.Write("\r\x1B[2K" + text);
     }
 
-    private static string FormatBytes(ulong bytes)
+    /// <summary>
+    /// Formats bytes into a human-readable string using binary units (KB, MB, GB, TiB).
+    /// Steps at 1024 boundaries: 1024 B = 1 KB, 1024 KB = 1 MB, etc.
+    /// </summary>
+    public static string FormatBytes(ulong bytes)
     {
         ReadOnlySpan<string> units = ["B", "KB", "MB", "GB", "TB"];
         double size = bytes;
@@ -186,6 +221,6 @@ static class ProgressDisplay
             unit++;
         }
 
-        return $"{size,6:0.0} {units[unit]}";
+        return $"{size:0.00} {units[unit]}";
     }
 }
